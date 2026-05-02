@@ -9,6 +9,9 @@
 - **VAD** — Voice Activity Detection;
 - **RAG** — Retrieval Augmented Generation.
 
+<img width="2056" height="360" alt="Модуль преобразования аудио в текст" src="https://github.com/user-attachments/assets/2970f2ad-a72c-4b6d-bdee-4c615bdca6fd" />
+
+
 *Рисунок 1 — Структурная схема модуля преобразования аудио в текст*
 
 ## Функциональные требования к модулю:
