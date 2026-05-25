@@ -1,124 +1,108 @@
-# pip install faster-whisper sounddevice numpy silero-vad hf-xet
-
-import queue
-import sys
-import numpy as np
-import sounddevice as sd
-from faster_whisper import WhisperModel
-from silero_vad import load_silero_vad, VADIterator
-
-# ========== НАСТРОЙКИ ==========
-SAMPLE_RATE = 16000  # Частота дискретизации (16 кГц)
-VAD_FRAME_SAMPLES = 512  # Размер фрейма для VAD (32 мс при 16 кГц)
-BYTES_PER_SAMPLE = 2  # int16 = 2 байта
-FRAME_BYTES_LEN = VAD_FRAME_SAMPLES * BYTES_PER_SAMPLE
-
-WHISPER_MODEL_SIZE = "base"  # tiny, base, small, medium, large-v2
-DEVICE = "cpu"  # "cuda" для GPU, "cpu" для CPU
-COMPUTE_TYPE = "float16" if DEVICE == "cuda" else "int8"  # float16 для GPU, int8 для CPU
-# ===============================
-
-# Очередь для аудиоданных от микрофона
-audio_queue = queue.Queue()
+# Импорт библиотек
+from config import Config
+from audio_capture import MicrophoneSource
+from vad_detector import SileroVADDetector
+from speech_recognizer import FasterWhisperRecognizer
+from speech_builder import SpeechBuilder
+from session_context import SessionContext
 
 
-def audio_callback(indata, frames, time_info, status):
-    """Callback-функция, вызываемая при поступлении аудио с микрофона"""
-    if status:
-        print(status, file=sys.stderr)
-    audio_queue.put(bytes(indata))
+# Основная функция
+def main():
+    # Инициализируем настройки приложения
+    config = Config()
 
+    # Создаем объект для поддержания состояния сессии распознавания
+    session = SessionContext(config)
 
-def pcm16_to_float32(audio_bytes: bytes) -> np.ndarray:
-    """Конвертирует PCM int16 в float32 (диапазон -1..1)"""
-    return np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    # Создаем детектор речи (VAD)
+    vad = SileroVADDetector(config)
 
+    # Создаем распознаватель речи (преобразует аудио в текст)
+    recognizer = FasterWhisperRecognizer(config)
 
-# Инициализация модели faster-whisper
-print(f"Загрузка модели faster-whisper ({WHISPER_MODEL_SIZE}) на {DEVICE}...")
-whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+    # Создаем сборщик итогового текста
+    builder = SpeechBuilder()
 
-# Инициализация Silero VAD
-vad_model = load_silero_vad(onnx=True)
-vad_iterator = VADIterator(
-    vad_model,
-    threshold=0.5,  # Порог срабатывания (0-1)
-    sampling_rate=SAMPLE_RATE,
-    min_silence_duration_ms=300,  # Минимальная тишина для завершения фразы
-    speech_pad_ms=400,  # Добавляем паузу вокруг речи
-)
+    # Создаем объект для захвата аудио с микрофона (без callback, всё работает через очередь)
+    """
+    Данные складываются в очередь, потому что, если callback долгий - можно потерять аудио.
+    """
+    mic = MicrophoneSource(config)
 
-# Запуск захвата с микрофона
-with sd.RawInputStream(
-        samplerate=SAMPLE_RATE,
-        blocksize=VAD_FRAME_SAMPLES,
-        device=None,  # Использовать устройство по умолчанию
-        dtype="int16",
-        channels=1,
-        callback=audio_callback,
-):
-    print("🎤 Слушаю... Говорите в микрофон. Ctrl+C для выхода.")
-    print("-" * 50)
-
-    pending_float = np.array([], dtype=np.float32)
-    pending_bytes = bytearray()
-    in_speech = False
-    speech_segment = bytearray()
-
+    # Пытаемся
     try:
-        while True:
-            # Получаем аудио из очереди
-            data = audio_queue.get()
+        # Запустить захват аудио с микрофона
+        mic.start()
+        print("🎤 Слушаю... Говорите в микрофон. Ctrl+C для выхода.")
+        print("-" * 50)
 
-            # Добавляем данные в буферы
-            pending_float = np.concatenate([pending_float, pcm16_to_float32(data)])
-            pending_bytes.extend(data)
+        # Пока захват аудио с микрофона нахожится в запущенном состоянии
+        while mic.is_running():
+            # Получаем следующий фрейм с аудиоданными из очереди
+            chunk = mic.get_audio_chunk()
 
-            # Обрабатываем пока есть полный фрейм
-            while len(pending_float) >= VAD_FRAME_SAMPLES and len(pending_bytes) >= FRAME_BYTES_LEN:
-                frame_float = pending_float[:VAD_FRAME_SAMPLES]
-                pending_float = pending_float[VAD_FRAME_SAMPLES:]
+            # Если очередь пустая
+            if chunk is None:
+                # Завершаем текущую итерацию цикла
+                continue
 
-                frame_bytes = bytes(pending_bytes[:FRAME_BYTES_LEN])
-                del pending_bytes[:FRAME_BYTES_LEN]
+            # Добавляем сырой байтовый фрейм от микрофона в буфер
+            session.add_audio_chunk(chunk)
 
-                event = vad_iterator(frame_float)
+            # Пока в буфере достаточно данных, чтобы извлечь из него хотя бы 1 фрейм
+            while session.has_complete_frame():
+                # Извлекаем следующий фрейм из буфера
+                frame_float, frame_bytes = session.pop_frame()
 
-                # Начало речи
-                if event is not None and "start" in event and not in_speech:
-                    in_speech = True
-                    speech_segment = bytearray()
+                # Подаем извлеченный фрейм на VAD для обработки
+                event = vad.process_frame(frame_float)
+
+                # Если:
+                # 1. VAD обнаружил изменения (появилась или исчезла речь)
+                # 2. изменение - это начало речи
+                # 3. сессия находится не в режиме записи речи
+                if event is not None and "start" in event and not session.in_speech:
+                    # Начинаем запись речи
+                    session.start_speech()
                     print("\n🎙️ Речь началась...")
 
-                # Накопление речи
-                if in_speech:
-                    speech_segment.extend(frame_bytes)
+                # Если сессия находится в режиме записи речи
+                if session.in_speech:
+                    # Добавляем фрейм в накопитель фразы
+                    session.accumulate_speech(frame_bytes)
 
-                # Конец речи
-                if event is not None and "end" in event and in_speech:
+                # Если:
+                # 1. VAD обнаружил изменения (появилась или исчезла речь)
+                # 2. изменение - это конец речи
+                # 3. сессия находится в режиме записи речи
+                if event is not None and "end" in event and session.in_speech:
                     print("🛑 Речь закончилась. Распознаю...")
 
-                    if len(speech_segment) > 0:
-                        # Конвертируем накопленные данные в numpy массив для whisper
-                        audio_np = np.frombuffer(bytes(speech_segment), dtype=np.int16).astype(np.float32) / 32768.0
+                    # Получаем накопленную фразу
+                    audio_for_recognition = session.end_speech()
 
-                        # Распознавание через faster-whisper
-                        segments, info = whisper_model.transcribe(
-                            audio_np,
-                            beam_size=5,
-                            language=None,  # Автоопределение языка
-                            vad_filter=False,  # VAD уже используем отдельно
-                        )
-
-                        # Собираем результат
-                        transcribed_text = " ".join(segment.text for segment in segments)
-                        print(f"📝 [{info.language}:{info.language_probability:.2f}] {transcribed_text}")
+                    # Если длина массива с аудиоданными не нулевая
+                    if len(audio_for_recognition) > 0:
+                        # Преобразуем аудио в текст и получаем текст, язык и уверенность в языке
+                        text, lang, lang_prob = recognizer.recognize(audio_for_recognition)
+                        # Добавляем распознанный текст в сборщик итогового текста
+                        builder.add_fragment(text)
+                        print(f"📝 [{lang}:{lang_prob:.2f}] {text}")
                         print("-" * 50)
 
-                    # Сброс состояния VAD
-                    vad_iterator.reset_states()
-                    in_speech = False
-                    speech_segment = bytearray()
-
+                    # Сбрасываем внутреннее состояние VAD
+                    vad.reset()
+    # Перехватываем исключение, которое возникает при нажатии Ctrl+C
     except KeyboardInterrupt:
         print("\n👋 Программа остановлена.")
+    # В любом случае
+    finally:
+        # Останавливаем захват аудио с микрофона
+        mic.stop()
+
+
+# Если этот файл был запущен как самостоятельная программа
+if __name__ == "__main__":
+    # Выполняем функцию main
+    main()
