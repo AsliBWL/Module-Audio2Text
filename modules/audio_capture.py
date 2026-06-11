@@ -46,7 +46,7 @@ class MicrophoneSource(AudioSource):
 
         # Сохраняем пользовательский callback для уведомлений о получении данных
         """
-        Пользовательский callback вызывается после добавления данных в очередь.
+        Пользовательский callback, который вызывается каждый раз, когда в очередь добавляются данные.
         """
         self.callback = callback
 
@@ -166,7 +166,7 @@ class MicrophoneSource(AudioSource):
             self._stream = None
 
         # Сбрасываем флаг состояния
-        # self._is_running = False
+        self._is_running = False
 
         """
         Примечание: очередь audio_queue НЕ очищается!

@@ -4,6 +4,21 @@ import numpy as np
 from faster_whisper import WhisperModel
 from modules.config import Config
 
+# --------------------------------------------------------------------------------------------
+# ------------------------------------ НАЧАЛО НОВОГО КОДА ------------------------------------
+# --------------------------------------------------------------------------------------------
+import asyncio
+import websockets
+import json
+import base64
+import soundfile as sf
+import io
+import numpy as np
+from modules.config import Config
+# --------------------------------------------------------------------------------------------
+# ------------------------------------- КОНЕЦ НОВОГО КОДА ------------------------------------
+# --------------------------------------------------------------------------------------------
+
 
 class SpeechRecognizerInterface(ABC):
     """
@@ -116,3 +131,76 @@ class FasterWhisperRecognizer(SpeechRecognizerInterface):
 
         # Возвращаем результат в виде кортежа (текст, язык, уверенность)
         return text, language, language_prob
+
+
+# --------------------------------------------------------------------------------------------
+# ------------------------------------ НАЧАЛО НОВОГО КОДА ------------------------------------
+# --------------------------------------------------------------------------------------------
+class RemoteWhisperRecognizer(SpeechRecognizerInterface):
+    """
+    Распознавание речи через удалённый сервер whisper-live.
+    Отправляет аудио по WebSocket и получает текст.
+    """
+
+    def __init__(self, config: Config, server_host: str = "192.168.1.100"):
+        """
+        Args:
+            config: объект конфигурации (нужен для параметров языка и т.д.)
+            server_host: IP-адрес ПК с GPU, где запущен whisper-live
+        """
+        self.config = config
+        self.server_host = server_host
+        self.websocket_url = f"ws://{server_host}:9090"
+
+    def recognize(self, audio: np.ndarray) -> tuple[str, str, float]:
+        """
+        Отправляет аудио на сервер и возвращает результат.
+
+        Args:
+            audio: массив float32 с частотой 16000 Гц (уже нормализован)
+
+        Returns:
+            (text, language, confidence)
+        """
+        # Конвертируем float32 в int16 (как ожидает сервер)
+        audio_int16 = (audio * 32767).astype(np.int16)
+
+        # Сохраняем во временный буфер в формате WAV
+        buffer = io.BytesIO()
+        sf.write(buffer, audio_int16, 16000, format='WAV')
+        wav_bytes = buffer.getvalue()
+
+        # Отправляем через WebSocket и получаем результат
+        try:
+            # Для синхронного вызова используем asyncio.run()
+            text = asyncio.run(self._send_audio_and_receive(wav_bytes))
+            # Сервер возвращает только текст, язык и уверенность не передаются
+            return text, self.config.language, 1.0
+        except Exception as e:
+            print(f"❌ Ошибка при обращении к удалённому серверу: {e}")
+            return "", self.config.language, 0.0
+
+    async def _send_audio_and_receive(self, wav_bytes: bytes) -> str:
+        """
+        Асинхронная отправка аудио и получение результата.
+        """
+        try:
+            async with websockets.connect(self.websocket_url) as websocket:
+                # Отправляем аудио
+                await websocket.send(wav_bytes)
+                # Получаем результат (сервер может вернуть JSON или plain text)
+                response = await websocket.recv()
+
+                # Пытаемся распарсить JSON
+                try:
+                    data = json.loads(response)
+                    return data.get("text", "")
+                except json.JSONDecodeError:
+                    return response
+        except asyncio.TimeoutError:
+            return "Таймаут подключения к серверу распознавания"
+        except ConnectionRefusedError:
+            return "Сервер распознавания недоступен"
+# --------------------------------------------------------------------------------------------
+# ------------------------------------- КОНЕЦ НОВОГО КОДА ------------------------------------
+# --------------------------------------------------------------------------------------------
