@@ -1,6 +1,6 @@
 # Импорт библиотек
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import re
@@ -8,9 +8,16 @@ from pathlib import Path
 from datetime import datetime
 import tempfile
 import os
+import io
+import numpy as np
+import soundfile as sf
 
 # Импорт модулей Text2Speech
-from modules_t2s.context import Context
+from modules_t2s.context import Context as T2SContext
+
+# Импорт модулей Speech2Text
+from modules_s2t.config import Config as S2TConfig
+from modules_s2t.speech_recognizer import FasterWhisperRecognizer
 
 
 # Запрос для эндпоинта генерации аудио
@@ -24,16 +31,31 @@ class TextToSpeechRequest(BaseModel):
     sample_rate: Optional[int] = 24000  # Частота дискретизации для Silero TTS
 
 
+# Запрос для эндпоинта распознавания речи
+class SpeechToTextRequest(BaseModel):
+    """
+    Запрос для эндпоинта распознавания речи из аудио.
+    """
+    whisper_model_version: Optional[str] = "small"  # Версия модели Whisper
+    device: Optional[str] = "cpu"  # Устройство для вычислений
+    language: Optional[str] = "ru"  # Язык распознавания
+    auto_language: Optional[bool] = False  # Автоопределение языка
+
+
 # Создаём FastAPI приложение
 app = FastAPI(
-    title="Text2Speech API",
-    description="API для преобразования текста в аудио с использованием моделей Silero TTS и Qwen3-TTS",
+    title="Audio Processing API",
+    description="API для преобразования текста в аудио (TTS) и аудио в текст (STT) с использованием моделей Silero TTS, Qwen3-TTS и Whisper",
     version="1.0.0"
 )
 
 
-# Глобальный контекст для повторного использования модели
-context: Optional[Context] = None
+# Глобальный контекст для повторного использования модели TTS
+tts_context: Optional[T2SContext] = None
+
+# Глобальный конфиг и распознаватель для STT
+s2t_config: Optional[S2TConfig] = None
+s2t_recognizer: Optional[FasterWhisperRecognizer] = None
 
 
 def init_context(model_name: str = "Silero TTS", silero_speaker: str = "kseniya", sample_rate: int = 24000):
@@ -45,13 +67,35 @@ def init_context(model_name: str = "Silero TTS", silero_speaker: str = "kseniya"
         silero_speaker: Голос для Silero TTS
         sample_rate: Частота дискретизации для Silero TTS
     """
-    global context
-    if context is None:
-        context = Context(
+    global tts_context
+    if tts_context is None:
+        tts_context = T2SContext(
             model_name=model_name,
             silero_speaker=silero_speaker,
             sample_rate=sample_rate
         )
+
+
+def init_s2t(whisper_model_version: str = "small", device: str = "cpu",
+             language: str = "ru", auto_language: bool = False):
+    """
+    Инициализирует распознаватель речи.
+
+    Args:
+        whisper_model_version: Версия модели Whisper
+        device: Устройство для вычислений
+        language: Язык распознавания
+        auto_language: Автоопределение языка
+    """
+    global s2t_config, s2t_recognizer
+    if s2t_config is None or s2t_recognizer is None:
+        s2t_config = S2TConfig(
+            whisper_model_version=whisper_model_version,
+            device=device,
+            language=language,
+            auto_language=auto_language
+        )
+        s2t_recognizer = FasterWhisperRecognizer(s2t_config)
 
 
 def split_into_sentences(text: str, sentences_per_chunk: int = 2):
@@ -92,19 +136,21 @@ def split_into_sentences(text: str, sentences_per_chunk: int = 2):
 
 @app.on_event("startup")
 async def startup_event():
-    """Инициализирует контекст при запуске приложения."""
+    """Инициализирует контексты при запуске приложения."""
     init_context()
+    init_s2t()
 
 
 @app.get("/")
 async def root():
     """Корневой эндпоинт с информацией о API."""
     return {
-        "message": "Text2Speech API",
+        "message": "Audio Processing API",
         "version": "1.0.0",
         "endpoints": {
             "/docs": "Интерактивная документация Swagger UI",
-            "/generate_speech": "POST - Генерация аудио из текста"
+            "/generate_speech": "POST - Генерация аудио из текста (TTS)",
+            "/transcribe_audio": "POST - Распознавание речи из аудио (STT)"
         }
     }
 
@@ -127,13 +173,13 @@ async def generate_speech(request: TextToSpeechRequest):
             raise HTTPException(status_code=400, detail="Текст не может быть пустым")
 
         # Инициализируем или обновляем контекст при необходимости
-        global context
-        if context is None or (
-            hasattr(context, 'config') and
-            context.config.silero_speaker != request.silero_speaker or
-            context.config.sample_rate != request.sample_rate
+        global tts_context
+        if tts_context is None or (
+            hasattr(tts_context, 'config') and
+            tts_context.config.silero_speaker != request.silero_speaker or
+            tts_context.config.sample_rate != request.sample_rate
         ):
-            context = Context(
+            tts_context = T2SContext(
                 model_name=request.model_name,
                 silero_speaker=request.silero_speaker,
                 sample_rate=request.sample_rate
@@ -145,7 +191,7 @@ async def generate_speech(request: TextToSpeechRequest):
         # Генерируем аудио для каждой группы
         for i, chunk in enumerate(text_chunks, 1):
             print(f"Генерация аудио для группы {i}/{len(text_chunks)}: '{chunk[:50]}...'")
-            context.start(chunk)
+            tts_context.start(chunk)
 
         # Создаём временную директорию для сохранения аудио
         temp_dir = tempfile.mkdtemp()
@@ -154,7 +200,7 @@ async def generate_speech(request: TextToSpeechRequest):
         output_path = os.path.join(temp_dir, output_filename)
 
         # Сохраняем объединённое аудио
-        saved_path = context.save_audio(output_path)
+        saved_path = tts_context.save_audio(output_path)
 
         if not saved_path:
             raise HTTPException(status_code=500, detail="Не удалось сохранить аудио")
@@ -184,6 +230,99 @@ def cleanup_temp_file(temp_dir: str):
             os.rmdir(temp_dir)
     except Exception:
         pass  # Игнорируем ошибки при очистке
+
+
+@app.post("/transcribe_audio")
+async def transcribe_audio(
+    audio_file: UploadFile = File(...),
+    whisper_model_version: Optional[str] = "small",
+    device: Optional[str] = "cpu",
+    language: Optional[str] = "ru",
+    auto_language: Optional[bool] = False
+):
+    """
+    Распознает речь из аудиофайла и возвращает текст.
+
+    Args:
+        audio_file: Загруженный аудиофайл (WAV, MP3 и другие форматы)
+        whisper_model_version: Версия модели Whisper
+        device: Устройство для вычислений
+        language: Язык распознавания
+        auto_language: Автоопределение языка
+
+    Returns:
+        JSONResponse: JSON с распознанным текстом и информацией о языке
+    """
+
+    try:
+        # Проверяем, что файл загружен
+        if not audio_file or not audio_file.filename:
+            raise HTTPException(status_code=400, detail="Файл не загружен")
+
+        print(f"Загружен файл: {audio_file.filename}, тип: {audio_file.content_type}")
+
+        # Инициализируем или обновляем распознаватель при необходимости
+        global s2t_config, s2t_recognizer
+        if s2t_config is None or s2t_recognizer is None or \
+           s2t_config.whisper_model_version != whisper_model_version or \
+           s2t_config.device != device or \
+           s2t_config.language != language or \
+           s2t_config.auto_language != auto_language:
+
+            s2t_config = S2TConfig(
+                whisper_model_version=whisper_model_version,
+                device=device,
+                language=language,
+                auto_language=auto_language
+            )
+            s2t_recognizer = FasterWhisperRecognizer(s2t_config)
+            print(f"Распознаватель инициализирован: model={whisper_model_version}, device={device}")
+
+        # Читаем загруженный файл
+        audio_content = await audio_file.read()
+
+        # Загружаем аудиофайл с помощью soundfile
+        try:
+            audio_array, sample_rate = sf.read(io.BytesIO(audio_content))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Не удалось прочитать аудиофайл: {str(e)}")
+
+        # Если аудио стерео, конвертируем в моно
+        if len(audio_array.shape) > 1:
+            audio_array = np.mean(audio_array, axis=1)
+
+        # Ресемплируем до 16kHz если нужно (Whisper требует 16kHz)
+        if sample_rate != 16000:
+            # Простое ресемплирование через NumPy (для точности лучше использовать librosa)
+            from scipy import signal
+            number_of_samples = round(len(audio_array) * float(16000) / sample_rate)
+            audio_array = signal.resample(audio_array, number_of_samples)
+
+        # Нормализуем аудио в float32 диапазоне -1..1
+        audio_array = audio_array.astype(np.float32)
+        if np.abs(audio_array).max() > 1.0:
+            audio_array = audio_array / np.abs(audio_array).max()
+
+        print(f"Аудио загружено: длина={len(audio_array)}, sample_rate={sample_rate}")
+
+        # Распознаем речь
+        text, detected_lang, lang_prob = s2t_recognizer.recognize(audio_array)
+
+        print(f"Распознанный текст: '{text}', язык: {detected_lang}, уверенность: {lang_prob:.2f}")
+
+        # Возвращаем результат в формате JSON
+        return JSONResponse({
+            "text": text.strip(),
+            "language": detected_lang,
+            "language_probability": float(lang_prob),
+            "audio_filename": audio_file.filename,
+            "audio_duration_seconds": len(audio_array) / 16000.0
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ошибка при распознавании речи: {str(e)}")
 
 
 if __name__ == "__main__":
