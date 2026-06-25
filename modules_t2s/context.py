@@ -155,3 +155,17 @@ class Context:
 
         # Добавляем синтезированное аудио в сборщик
         self.builder.add_audio(audio, sample_rate)
+
+    # Функция сохранения всех синтезированных аудио в один файл
+    def save_audio(self, output_path: str = "output/merged_audio.wav"):
+        """
+        Объединяет все синтезированные аудио в один файл и сохраняет его.
+
+        Args:
+            output_path (str): Путь для сохранения объединенного аудиофайла.
+
+        Returns:
+            str: Путь к сохраненному файлу или None, если нет аудио для сохранения.
+        """
+
+        return self.builder.save_merged_audio(output_path)
