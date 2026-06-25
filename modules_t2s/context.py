@@ -151,10 +151,11 @@ class Context:
         audio, sample_rate = self.t2s_model.synthesis(text)
 
         # Воспроизводим синтезированное аудио
-        AudioPlayer.play_audio(audio, sample_rate)
+        # AudioPlayer.play_audio(audio, sample_rate)
 
         # Добавляем синтезированное аудио в сборщик
         self.builder.add_audio(audio, sample_rate)
+        self.save_audio()
 
     # Функция сохранения всех синтезированных аудио в один файл
     def save_audio(self, output_path: str = "output/merged_audio.wav"):
