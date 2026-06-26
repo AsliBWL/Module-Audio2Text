@@ -1,8 +1,4 @@
-version: '3.8'
-
 services:
-  # Альтернативный сервис с поддержкой GPU NVIDIA
-  # Для использования необходимо установить nvidia-docker2
   audio-api-gpu:
     build:
       context: .
@@ -23,14 +19,4 @@ services:
           memory: 4G
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-    profiles:
-      - gpu  # Используйте: docker-compose --profile gpu up
 
-volumes:
-  models:
-  cache:
-  output:
-
-networks:
-  default:
-    name: audio2text-network
