@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+.venv
+venv/
+ENV/
+env/
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Проект специфичное
+output/
+tasks/
+architecture/
+*.txt
+logs/
+*.log
+
+# Документация
+README.md
+CLAUDE.md
+API_README.md
+Подготовка к работе с модулем Text2Speech.txt
+audio_device_selection.txt
+
+# Тесты
+test_*.py
+pytest.ini
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+
+# Временные файлы
+tmp/
+temp/
+*.tmp
