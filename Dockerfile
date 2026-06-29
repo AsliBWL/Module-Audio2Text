@@ -18,7 +18,6 @@ RUN pip install --no-cache-dir -r requirements_s2t.txt
 
 # Копируем файлы приложения
 COPY api_t2s.py .
-COPY modules/ ./modules/
 COPY modules_s2t/ ./modules_s2t/
 
 # Создаем директорию для временных файлов
