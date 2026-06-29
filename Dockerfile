@@ -12,17 +12,14 @@ WORKDIR /app
 
 # Копируем requirements.txt
 COPY requirements_s2t.txt .
-COPY requirements_t2s.txt .
 
 # Устанавливаем Python зависимости
 RUN pip install --no-cache-dir -r requirements_s2t.txt
-RUN pip install --no-cache-dir -r requirements_t2s.txt
 
 # Копируем файлы приложения
 COPY api_t2s.py .
 COPY modules/ ./modules/
 COPY modules_s2t/ ./modules_s2t/
-COPY modules_t2s/ ./modules_t2s/
 
 # Создаем директорию для временных файлов
 RUN mkdir -p /tmp/audio_processing
