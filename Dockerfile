@@ -1,16 +1,11 @@
 # Используем официальный образ Python с slim-версией Debian
 FROM python:3.11-slim
 
-# Устанавливаем системные зависимости
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    wget \
-    libsndfile1 \
-    PortAudio \
-    libportaudio2 \
-    libportaudiocpp0 \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y gcc g++ make && \
+    apt-get install -y sox && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
