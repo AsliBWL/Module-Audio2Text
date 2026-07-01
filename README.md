@@ -97,5 +97,5 @@
 
 | **Тип модели** | **Наименование модели** |
 |:---:|:---|
-| Text2Speech | Qwen3-TTS |
-| Text2Speech | Silero TTS |
+| Text2Speech | Qwen3-TTS - тяжелая модель, работает на GPU |
+| Text2Speech | Silero TTS - легкая модель, может работать на CPU |
